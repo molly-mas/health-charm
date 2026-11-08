@@ -23,6 +23,7 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "healthcharm/pico")
             .setMethodCallHandler { call, result ->
                 if (call.method == "reminder") picoReminder.send(call.arguments as? String, result)
+                else if (call.method == "sendFace") picoReminder.sendFace(call.arguments as? String, result)
                 else result.notImplemented()
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "facebolt/model")

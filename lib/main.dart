@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -198,6 +199,182 @@ String _intervalLabel(int seconds) {
   return 'Every $minutes min';
 }
 
+class AddReminderDialog extends StatefulWidget {
+  const AddReminderDialog({super.key, required this.iconForTitle});
+
+  final IconData? Function(String) iconForTitle;
+
+  @override
+  State<AddReminderDialog> createState() => _AddReminderDialogState();
+}
+
+class CustomIntervalDialog extends StatefulWidget {
+  const CustomIntervalDialog({super.key});
+
+  @override
+  State<CustomIntervalDialog> createState() => _CustomIntervalDialogState();
+}
+
+class _CustomIntervalDialogState extends State<CustomIntervalDialog> {
+  final _controller = TextEditingController(text: '60');
+  final _formKey = GlobalKey<FormState>();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Custom interval'),
+        content: Form(
+          key: _formKey,
+          child: TextFormField(
+            controller: _controller,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(
+              labelText: 'Minutes between reminders',
+              helperText: '1 to 10,080 minutes (7 days)',
+            ),
+            validator: (value) {
+              final number = int.tryParse(value ?? '');
+              if (number == null || number < 1 || number > 10080) {
+                return 'Enter a number from 1 to 10,080';
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (_formKey.currentState!.validate()) {
+                Navigator.pop(context, int.parse(_controller.text));
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      );
+}
+
+class _AddReminderDialogState extends State<AddReminderDialog> {
+  final _titleController = TextEditingController();
+  ReminderSchedule _schedule = const ReminderSchedule.everyMinutes(60);
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Add a reminder'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: _titleController,
+            autofocus: true,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(
+                labelText: 'What should your buddy remind you to do?'),
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('When should it remind you?'),
+            subtitle: Text(_schedule.label(context)),
+            trailing: const Icon(Icons.edit_calendar_rounded),
+            onTap: () async {
+              final selected = await _pickSchedule(context, _schedule);
+              if (selected != null && mounted) {
+                setState(() => _schedule = selected);
+              }
+            },
+          ),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              final title = _titleController.text.trim();
+              if (title.isEmpty) return;
+              Navigator.pop(
+                context,
+                FaceReminder(
+                  title: title,
+                  schedule: _schedule,
+                  icon: widget.iconForTitle(title),
+                ),
+              );
+            },
+            child: const Text('Add reminder'),
+          ),
+        ],
+      );
+
+  Future<ReminderSchedule?> _pickSchedule(
+      BuildContext context, ReminderSchedule current) async {
+    final choice = await showModalBottomSheet<int>(
+      context: context,
+      useSafeArea: true,
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * .65,
+        child: ListView(children: [
+          const ListTile(title: Text('Choose a reminder time')),
+          for (final seconds in _intervals)
+            ListTile(
+              title: Text(_intervalLabel(seconds)),
+              trailing: current.intervalSeconds == seconds
+                  ? const Icon(Icons.check_rounded)
+                  : null,
+              onTap: () => Navigator.pop(sheetContext, seconds),
+            ),
+          ListTile(
+            leading: const Icon(Icons.tune_rounded),
+            title: const Text('Custom interval'),
+            subtitle: const Text('Any number of minutes, up to 7 days'),
+            onTap: () => Navigator.pop(sheetContext, -1),
+          ),
+          ListTile(
+            leading: const Icon(Icons.schedule_rounded),
+            title: const Text('At a specific time'),
+            subtitle: const Text('Every day at a clock time'),
+            onTap: () => Navigator.pop(sheetContext, -2),
+          ),
+        ]),
+      ),
+    );
+    if (choice == null || !context.mounted) return null;
+    if (choice > 0) return ReminderSchedule.everySeconds(choice);
+    if (choice == -2) {
+      final time = await showTimePicker(
+        context: context,
+        initialTime: current.timeOfDay ?? TimeOfDay.now(),
+      );
+      return time == null ? null : ReminderSchedule.dailyAt(time);
+    }
+    return _customInterval(context, current);
+  }
+
+  Future<ReminderSchedule?> _customInterval(
+      BuildContext context, ReminderSchedule current) async {
+    final minutes = await showDialog<int>(
+      context: context,
+      builder: (_) => const CustomIntervalDialog(),
+    );
+    return minutes == null ? null : ReminderSchedule.everyMinutes(minutes);
+  }
+}
+
 final _moods = <String, BuddyMood>{
   'happy': BuddyMood(
     name: 'Feeling sunny',
@@ -271,6 +448,18 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
 
   final _reminderTimers = <FaceReminder, Timer>{};
   Future<void> _reminderDelivery = Future<void>.value();
+  Future<void> _faceDelivery = Future<void>.value();
+  Timer? _faceSendTimer;
+  Timer? _blinkTimer;
+  Timer? _blinkResetTimer;
+  bool _eyesClosed = false;
+  int _faceSendVersion = 0;
+
+  String get _displayFace {
+    final face = _selectedFace ?? _mood.face;
+    if (face != faceById('default').ascii) return face;
+    return _eyesClosed ? '(  -_-  )' : face;
+  }
 
   void _scheduleReminder(FaceReminder reminder) {
     _reminderTimers.remove(reminder)?.cancel();
@@ -321,12 +510,91 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
     );
   }
 
+  void _queueFaceToPico(String face) {
+    final version = ++_faceSendVersion;
+    _faceSendTimer?.cancel();
+    _faceSendTimer = Timer(const Duration(milliseconds: 350), () {
+      _faceDelivery = _faceDelivery.then((_) async {
+        if (!mounted || version != _faceSendVersion) return;
+        try {
+          final definition = await _encodeFaceDefinition(face);
+          if (!mounted || version != _faceSendVersion) return;
+          await const MethodChannel('healthcharm/pico')
+              .invokeMethod<void>('sendFace', definition);
+        } on PlatformException catch (error) {
+          if (mounted && version == _faceSendVersion) {
+            _reminderMessage(error.message ?? 'Could not send face to Pico W');
+          }
+        } on MissingPluginException {
+          // BLE face output is available on Android only.
+        }
+      });
+    });
+  }
+
+  Future<String> _encodeFaceDefinition(String face) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawColor(const Color(0xFF000000), ui.BlendMode.src);
+
+    // Keep the face compact on the 64x64 OLED, with generous margins.
+    var fontSize = 20.0;
+    late TextPainter painter;
+    do {
+      painter = TextPainter(
+        text: TextSpan(
+          text: face,
+          style: TextStyle(
+            color: const Color(0xFFFFFFFF),
+            fontFamily: 'monospace',
+            fontSize: fontSize,
+            height: 1,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+      )..layout(maxWidth: 42);
+      if (painter.width <= 42 && painter.height <= 28) break;
+      fontSize -= 1;
+    } while (fontSize > 8);
+
+    painter.paint(
+        canvas, Offset((64 - painter.width) / 2, (64 - painter.height) / 2));
+    final image = await recorder.endRecording().toImage(64, 64);
+    final rgba = (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!
+        .buffer
+        .asUint8List();
+    image.dispose();
+
+    final pixels = List<int>.filled(64 * 64 ~/ 8, 0);
+    for (var y = 0; y < 64; y++) {
+      for (var x = 0; x < 64; x++) {
+        final offset = (y * 64 + x) * 4;
+        if (rgba[offset] > 127) {
+          pixels[(y ~/ 8) * 64 + x] |= 1 << (y % 8);
+        }
+      }
+    }
+    final hex =
+        pixels.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
+    return 'FACEDEF:normal|64x64|$hex|\n';
+  }
+
   @override
   void initState() {
     super.initState();
     for (final reminder in _reminders) {
       _scheduleReminder(reminder);
     }
+    _queueFaceToPico(_mood.face);
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 2800), (_) {
+      if (!mounted || _displayFace != faceById('default').ascii) return;
+      setState(() => _eyesClosed = true);
+      _blinkResetTimer?.cancel();
+      _blinkResetTimer = Timer(const Duration(milliseconds: 140), () {
+        if (mounted) setState(() => _eyesClosed = false);
+      });
+    });
     if (LocalModelStore.supported) unawaited(_restoreModel());
   }
 
@@ -335,6 +603,9 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
     for (final timer in _reminderTimers.values) {
       timer.cancel();
     }
+    _faceSendTimer?.cancel();
+    _blinkTimer?.cancel();
+    _blinkResetTimer?.cancel();
     unawaited(_faceEngine.dispose());
     _faceHintController.dispose();
     super.dispose();
@@ -401,6 +672,7 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
       _touched = key == 'touch';
       _selectedFace = null;
     });
+    if (!_faceEngine.isLoaded) _queueFaceToPico(_mood.face);
     if (_faceEngine.isLoaded) {
       final request = buildFaceSelectionRequest(
         style: _faceStyle,
@@ -423,6 +695,7 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
       final face = await _faceEngine.choose(request);
       if (mounted && requestId == _faceRequestId) {
         setState(() => _selectedFace = face.ascii);
+        _queueFaceToPico(face.ascii);
       }
     } catch (error) {
       if (mounted && requestId == _faceRequestId) {
@@ -820,18 +1093,18 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
           ]),
           const SizedBox(height: 18),
           AnimatedSwitcher(
-            duration: const Duration(milliseconds: 230),
+            duration: const Duration(milliseconds: 80),
             transitionBuilder: (child, animation) => FadeTransition(
                 opacity: animation,
                 child: ScaleTransition(scale: animation, child: child)),
             child: Container(
-              key: ValueKey('$_moodKey:${_selectedFace ?? ''}'),
+              key: ValueKey('$_moodKey:$_displayFace'),
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 17, horizontal: 12),
               decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: .88),
                   borderRadius: BorderRadius.circular(22)),
-              child: Text(_selectedFace ?? _mood.face,
+              child: Text(_displayFace,
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       fontFamily: 'monospace',
@@ -1074,59 +1347,10 @@ class _HealthCharmPreviewState extends State<HealthCharmPreview> {
   }
 
   Future<void> _addReminder() async {
-    final titleController = TextEditingController();
-    var schedule = const ReminderSchedule.everyMinutes(60);
     final result = await showDialog<FaceReminder>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Add a reminder'),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(
-              controller: titleController,
-              autofocus: true,
-              textCapitalization: TextCapitalization.sentences,
-              decoration: const InputDecoration(
-                  labelText: 'What should your buddy remind you to do?'),
-            ),
-            const SizedBox(height: 16),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('When should it remind you?'),
-              subtitle: Text(schedule.label(context)),
-              trailing: const Icon(Icons.edit_calendar_rounded),
-              onTap: () async {
-                final selected = await _pickSchedule(dialogContext, schedule);
-                if (selected != null && dialogContext.mounted) {
-                  setDialogState(() => schedule = selected);
-                }
-              },
-            ),
-          ]),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cancel')),
-            FilledButton(
-              onPressed: () {
-                final title = titleController.text.trim();
-                if (title.isEmpty) return;
-                Navigator.pop(
-                  dialogContext,
-                  FaceReminder(
-                    title: title,
-                    schedule: schedule,
-                    icon: _iconForReminder(title),
-                  ),
-                );
-              },
-              child: const Text('Add reminder'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => AddReminderDialog(iconForTitle: _iconForReminder),
     );
-    titleController.dispose();
     if (result != null && mounted) {
       setState(() => _reminders.add(result));
       _scheduleReminder(result);

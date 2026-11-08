@@ -17,7 +17,8 @@ internal class PicoReminder(private val activity: Activity) {
     private var pending: MethodChannel.Result? = null
     private var scanner: BluetoothLeScanner? = null
     private var gatt: BluetoothGatt? = null
-    private var payload = byteArrayOf()
+    private var payloads = listOf<ByteArray>()
+    private var payloadIndex = 0
     private val timeout = Runnable { finish("Pico W did not respond. Check that it is powered on and nearby.") }
 
     private val scan = object : ScanCallback() {
@@ -61,23 +62,22 @@ internal class PicoReminder(private val activity: Activity) {
                     finish("Pico W display service is unavailable")
                     return@post
                 }
-                val accepted = if (Build.VERSION.SDK_INT >= 33) {
-                    client.writeCharacteristic(characteristic, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
-                        BluetoothStatusCodes.SUCCESS
-                } else {
-                    characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    characteristic.value = payload
-                    client.writeCharacteristic(characteristic)
-                }
-                if (!accepted) finish("Could not send reminder to Pico W")
+                payloadIndex = 0
+                writeNext(client, characteristic)
             }
         }
 
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             handler.post {
-                if (client == gatt) finish(
-                    if (status == BluetoothGatt.GATT_SUCCESS) null else "Pico W rejected the reminder"
-                )
+                if (client != gatt) return@post
+                if (status != BluetoothGatt.GATT_SUCCESS) finish("Pico W rejected the display data")
+                else {
+                    payloadIndex++
+                    val target = client.getService(service)?.getCharacteristic(display)
+                    if (payloadIndex >= payloads.size) finish(null)
+                    else if (target == null) finish("Pico W display service is unavailable")
+                    else writeNext(client, target)
+                }
             }
         }
     }
@@ -87,12 +87,27 @@ internal class PicoReminder(private val activity: Activity) {
             result.error("ICON", "Unknown reminder icon", null)
             return
         }
+        payloads = "FACE:normal\n".toByteArray(Charsets.US_ASCII).toList().chunked(20)
+            .map { chunk -> chunk.toByteArray() }
+        begin(result)
+    }
+
+    fun sendFace(face: String?, result: MethodChannel.Result) {
+        if (face.isNullOrEmpty() || !face.endsWith('\n') || face.any { it.code !in 0x20..0x7e && it != '\n' }) {
+            result.error("FACE", "Face definition must be printable ASCII and end with a newline", null)
+            return
+        }
+        payloads = face.toByteArray(Charsets.US_ASCII).toList().chunked(20)
+            .map { chunk -> chunk.toByteArray() }
+        begin(result)
+    }
+
+    private fun begin(result: MethodChannel.Result) {
         if (pending != null) {
-            result.error("BUSY", "A reminder is already being sent", null)
+            result.error("BUSY", "A Bluetooth send is already in progress", null)
             return
         }
         pending = result
-        payload = byteArrayOf(0xff.toByte()) + icon!!.toByteArray(Charsets.US_ASCII)
         val permissions = if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
@@ -101,6 +116,18 @@ internal class PicoReminder(private val activity: Activity) {
         val missing = permissions.filter { activity.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isEmpty()) startScan()
         else activity.requestPermissions(missing.toTypedArray(), permissionRequest)
+    }
+
+    private fun writeNext(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        val value = payloads[payloadIndex]
+        val accepted = if (Build.VERSION.SDK_INT >= 33) {
+            client.writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+        } else {
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.value = value
+            client.writeCharacteristic(characteristic)
+        }
+        if (!accepted) finish("Could not send display data to Pico W")
     }
 
     fun permissionsResult(grants: IntArray) {
@@ -142,7 +169,7 @@ internal class PicoReminder(private val activity: Activity) {
 
     companion object {
         const val permissionRequest = 7042
-        private val service = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
-        private val display = UUID.fromString("0000ffe2-0000-1000-8000-00805f9b34fb")
+        private val service = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val display = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     }
 }
