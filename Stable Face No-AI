@@ -1,0 +1,36 @@
+The Pico side already does this. emote1_ble_faces.py listens on the Nordic UART RX characteristic, and your app only needs to send one line of text per face. You can ignore face_to_ble.py.
+
+What the app has to send
+
+Write this to the RX characteristic (6E400002-B5A3-F393-E0A9-E50E24DCCA9E), ending with a newline:
+
+FACEDEF:<name>|<W>x<H>|<hex>|<optional caption>
+Name: letters, numbers, _ or -, up to 16 characters.
+Size: 64x64 is typical, but any width up to 128 and height up to 64 works. The height must be a multiple of 8.
+Hex: the pixel data, 2 hex characters per byte. A 64x64 face is 512 bytes, so 1024 hex characters.
+Chunking: split the line into writes of 20 bytes, or your negotiated MTU minus 3. The Pico reassembles everything up to the newline.
+
+How to pack the pixels
+
+The display wants 8 vertical pixels per byte:
+
+bytes = array of (W * H / 8) zeros
+for y in 0..H-1:
+    for x in 0..W-1:
+        if pixel(x, y) is lit:
+            bytes[(y // 8) * W + x] |= 1 << (y % 8)
+hex = bytes as lowercase hex string
+
+Lit means white on the OLED, so black pixels stay 0.
+
+Using the face afterward
+
+FACE:<name> shows it for 3 seconds.
+BASE:<name> sets it as the idle face.
+FACEDEF:normal|... replaces the built-in idle face directly, and the other built-in faces work the same way.
+
+Checking that it arrived
+
+The Thonny shell prints [Face] Stored 'name' (64x64). If your app subscribes to notifications on the TX characteristic (6E400003-...), it also gets FACEDEF:OK:name or FACEDEF:ERR:<reason>. The reasons are format, name, size, hex, length and full.
+
+If your app already sends faces in a different format, such as raw bytes, base64, a row-by-row bitmap or ASCII text, tell me what it sends and I’ll change the Pico’s parser to accept that instead of changing the app.
